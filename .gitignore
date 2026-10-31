@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Project output (models, logs, CSVs)
+results/
+
+# Personal project notes (kept local, repo is public)
+docs/
+
+# CLAUDE files
+CLAUDE.md

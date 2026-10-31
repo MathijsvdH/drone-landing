@@ -15,12 +15,5 @@ dependencies = [
     "tensorboard>=2.21.0",
 ]
 
-[project.scripts]
-drone-landing = "drone_landing:main"
-
-[build-system]
-requires = ["uv_build>=0.13.0,<0.14.0"]
-build-backend = "uv_build"
-
 [tool.uv.sources]
 gym-pybullet-drones = { path = "../../gym-pybullet-drones", editable = true }

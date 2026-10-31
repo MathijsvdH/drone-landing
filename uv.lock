@@ -219,7 +219,7 @@ wheels = [
 [[package]]
 name = "drone-landing"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "gym-pybullet-drones" },
     { name = "matplotlib" },
