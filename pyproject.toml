@@ -1,0 +1,26 @@
+[project]
+name = "drone-landing"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Mathijs", email = "539396@student.fontys.nl" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "gym-pybullet-drones",
+    "matplotlib>=3.11.2",
+    "pandas>=3.1.0",
+    "stable-baselines3>=2.9.2",
+    "tensorboard>=2.21.0",
+]
+
+[project.scripts]
+drone-landing = "drone_landing:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+gym-pybullet-drones = { path = "../../gym-pybullet-drones", editable = true }
