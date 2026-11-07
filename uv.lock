@@ -374,7 +374,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "gym-pybullet-drones", editable = "../../gym-pybullet-drones" },
+    { name = "gym-pybullet-drones", git = "https://github.com/utiasDSL/gym-pybullet-drones.git?rev=15c426c85ac8e7a5db66d8b100f48858133357f6" },
     { name = "imageio", specifier = ">=2.38.1" },
     { name = "imageio-ffmpeg", specifier = ">=0.7.0" },
     { name = "matplotlib", specifier = ">=3.11.2" },
@@ -539,7 +539,7 @@ wheels = [
 [[package]]
 name = "gym-pybullet-drones"
 version = "2.2.0"
-source = { editable = "../../gym-pybullet-drones" }
+source = { git = "https://github.com/utiasDSL/gym-pybullet-drones.git?rev=15c426c85ac8e7a5db66d8b100f48858133357f6#15c426c85ac8e7a5db66d8b100f48858133357f6" }
 dependencies = [
     { name = "control" },
     { name = "gymnasium" },
@@ -553,22 +553,6 @@ dependencies = [
     { name = "stable-baselines3" },
     { name = "torch" },
     { name = "transforms3d" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "control", specifier = ">=0.10.2,<0.11.0" },
-    { name = "gymnasium", specifier = ">=1.3,<2.0" },
-    { name = "matplotlib", specifier = ">=3.11,<4.0" },
-    { name = "numpy", specifier = ">=2.5,<3.0" },
-    { name = "pillow", specifier = ">=13.0,<14.0" },
-    { name = "pybullet", specifier = ">=3.2.7,<4.0.0" },
-    { name = "pytest", specifier = ">=9.1,<10.0" },
-    { name = "scipy", specifier = ">=1.18,<2.0" },
-    { name = "setuptools", specifier = ">=84.1" },
-    { name = "stable-baselines3", specifier = ">=2.9,<3.0" },
-    { name = "torch", specifier = ">=2.13,<3.0" },
-    { name = "transforms3d", specifier = ">=0.4,<0.5" },
 ]
 
 [[package]]

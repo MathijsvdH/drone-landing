@@ -1,7 +1,6 @@
 [project]
 name = "drone-landing"
 version = "0.1.0"
-description = "Add your description here"
 readme = "README.md"
 authors = [
     { name = "Mathijs", email = "539396@student.fontys.nl" }
@@ -18,7 +17,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-gym-pybullet-drones = { path = "../../gym-pybullet-drones", editable = true }
+gym-pybullet-drones = { git = "https://github.com/utiasDSL/gym-pybullet-drones.git", rev = "15c426c85ac8e7a5db66d8b100f48858133357f6" }
 
 [dependency-groups]
 dev = [
