@@ -3,11 +3,9 @@
 A simulated quadcopter learns to land on a moving platform with reinforcement learning (PPO), and is
 compared with a hand-tuned PID controller under identical conditions.
 
-<!-- Demo: add once the moving-pad agent works.
 <p align="center">
   <img src="assets/landing.gif" alt="PPO agent landing on the pad" width="640">
 </p>
--->
 
 ## Results
 
