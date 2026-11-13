@@ -41,8 +41,10 @@ class LandingAviary(BaseRLAviary):
                  record: bool = False,
                  speed_limit: float = 1.0,
                  episode_len_sec: float = 15.0,
+                 pad_speed_range: tuple[float, float] = (0.0, 0.0),
                  ):
         self.EPISODE_LEN_SEC = episode_len_sec
+        self.pad_speed_range = pad_speed_range  # m/s, sampled per episode; (0, 0) = static pad
         self.pad_pos = np.array([0.0, 0.0, PAD_HEIGHT])  # centre of the pad's top surface
         self.pad_vel = np.zeros(3)
         super().__init__(drone_model=drone_model,
@@ -61,6 +63,11 @@ class LandingAviary(BaseRLAviary):
         # Called by the library on reset, after np_random is seeded
         xy = self.np_random.uniform(-START_XY_RANGE, START_XY_RANGE, size=2)
         z = self.np_random.uniform(*START_Z_RANGE)
+        # Drawn after the start position, so a static pad gives exactly the same episodes as before
+        heading = self.np_random.uniform(0, 2 * np.pi)
+        speed = self.np_random.uniform(*self.pad_speed_range)
+        self.pad_pos = np.array([0.0, 0.0, PAD_HEIGHT])
+        self.pad_vel = speed * np.array([np.cos(heading), np.sin(heading), 0.0])
         self.INIT_XYZS = np.array([[self.pad_pos[0] + xy[0], self.pad_pos[1] + xy[1], z]])
         super()._housekeeping()
         self.ctrl[0].reset()  # the library never resets the PID, so integral errors leak between episodes
@@ -83,6 +90,15 @@ class LandingAviary(BaseRLAviary):
             basePosition=[self.pad_pos[0], self.pad_pos[1], PAD_HEIGHT / 2],
             physicsClientId=self.CLIENT,
         )
+
+    def step(self, action):
+        # Move the pad before the physics steps, so the observation and reward at the end of this
+        # step see the pad where it was during the step. The pad is teleported (it stays a static
+        # body), which is fine because the episode ends at the first contact anyway.
+        self.pad_pos = self.pad_pos + self.pad_vel * self.CTRL_TIMESTEP
+        p.resetBasePositionAndOrientation(self.PAD_ID, [self.pad_pos[0], self.pad_pos[1], PAD_HEIGHT / 2],
+                                          [0, 0, 0, 1], physicsClientId=self.CLIENT)
+        return super().step(action)
 
     def _observationSpace(self) -> spaces.Box:
         return spaces.Box(low=-np.inf, high=np.inf, shape=(1, 12), dtype=np.float32)

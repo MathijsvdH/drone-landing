@@ -3,11 +3,13 @@ from pathlib import Path
 
 import imageio.v2 as imageio
 import numpy as np
+import pandas as pd
 import pybullet as p
 from PIL import Image, ImageDraw
 from stable_baselines3 import PPO
 
 from envs.landing_aviary import LandingAviary
+from evaluate import training_pad_speed
 
 WIDTH, HEIGHT = 1280, 720
 HOLD_SECONDS = 1.0  # freeze on the final frame so the touchdown is visible
@@ -17,8 +19,38 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Record an MP4 of a trained agent landing.")
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1000, 1001, 1002, 1003, 1004])
-    parser.add_argument("--out", type=Path, default=None, help="default: landing.mp4 next to the model")
+    parser.add_argument("--from-csv", type=Path, default=None,
+                        help="pick seeds from an evaluate.py CSV by outcome instead of using --seeds")
+    parser.add_argument("--outcomes", nargs="+", default=None,
+                        help="with --from-csv: outcomes to show, in this order (default: all in the CSV, failures first)")
+    parser.add_argument("--per-outcome", type=int, default=2, help="with --from-csv: episodes per outcome")
+    parser.add_argument("--pad-speed", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="pad speed range in m/s; default: from the CSV if static, else the model's training range")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="default: landing.mp4 (or video_<csv name>.mp4) next to the model")
     return parser.parse_args()
+
+
+def seeds_from_csv(csv: pd.DataFrame, outcomes: list[str] | None, per_outcome: int) -> dict[int, str]:
+    # Failures first, so the interesting episodes are at the start of the video
+    if outcomes is None:
+        order = ["crashed", "out_of_bounds", "bad_landing", "timeout", "landed"]
+        outcomes = [o for o in order if o in set(csv["outcome"])]
+    picked = {}
+    for outcome in outcomes:
+        for seed in csv[csv["outcome"] == outcome]["seed"].head(per_outcome):
+            picked[int(seed)] = outcome
+    return picked
+
+
+def replay_pad_speed(args: argparse.Namespace, csv: pd.DataFrame | None) -> tuple[float, float]:
+    # The pad speed per seed depends on the range it was sampled from, so a replay must use the
+    # same range as the evaluation. A CSV with only static episodes means the range was (0, 0).
+    if args.pad_speed is not None:
+        return tuple(args.pad_speed)
+    if csv is not None and "pad_speed" in csv and (csv["pad_speed"] == 0).all():
+        return (0.0, 0.0)
+    return training_pad_speed(args.model)
 
 
 def render(env: LandingAviary) -> np.ndarray:
@@ -46,17 +78,25 @@ def caption(frame: np.ndarray, text: str) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
-    out = args.out or args.model.parent / "landing.mp4"
+    csv = pd.read_csv(args.from_csv) if args.from_csv else None
+    if csv is not None:
+        expected = seeds_from_csv(csv, args.outcomes, args.per_outcome)
+        default_name = f"video_{args.from_csv.stem}.mp4"
+    else:
+        expected = {seed: None for seed in args.seeds}
+        default_name = "landing.mp4"
+    out = args.out or args.model.parent / default_name
     model = PPO.load(args.model, device="cpu")
-    env = LandingAviary()
+    env = LandingAviary(pad_speed_range=replay_pad_speed(args, csv))
     fps = env.CTRL_FREQ  # one frame per control step = real-time playback
 
     with imageio.get_writer(out, fps=fps, codec="libx264", quality=8) as video:
-        for seed in args.seeds:
+        for seed, expected_outcome in expected.items():
             obs, _ = env.reset(seed=seed)
+            pad = f"pad {np.linalg.norm(env.pad_vel):.2f} m/s"
             while True:
                 t = env.step_counter / env.PYB_FREQ
-                video.append_data(caption(render(env), f"seed {seed}   t = {t:4.1f} s"))
+                video.append_data(caption(render(env), f"seed {seed}   {pad}   t = {t:4.1f} s"))
                 action, _ = model.predict(obs, deterministic=True)
                 obs, _, terminated, truncated, info = env.step(action)
                 if terminated or truncated:
@@ -65,10 +105,13 @@ def main() -> None:
             if info["touchdown_speed"] is not None:
                 result += (f"   speed {info['touchdown_speed']:.2f} m/s"
                            f"   offset {info['touchdown_offset'] * 100:.1f} cm")
-            final = caption(render(env), f"seed {seed}   {result}")
+            final = caption(render(env), f"seed {seed}   {pad}   {result}")
             for _ in range(int(HOLD_SECONDS * fps)):
                 video.append_data(final)
             print(f"seed {seed}: {result}")
+            # Only happens if the replay differs from the evaluation (e.g. a --stochastic CSV or another pad speed)
+            if expected_outcome is not None and info["outcome"] != expected_outcome:
+                print(f"  WARNING: CSV says {expected_outcome}, replay gave {info['outcome']}")
     env.close()
     print(f"wrote {out}")
 

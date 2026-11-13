@@ -1,3 +1,9 @@
+import os
+
+# Training runs on CPU, but PyTorch's Adam still queries CUDA on every step when a GPU is visible,
+# so disconnecting the GPU for power saving mid-run crashed training. Hide it before torch is imported.
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import argparse
 import json
 from collections import defaultdict
@@ -42,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-envs", type=int, default=8, help="parallel environments (one process each)")
     parser.add_argument("--run-name", type=str, default=None, help="default: ppo_seed<seed>_<timestamp>")
+    parser.add_argument("--pad-speed", type=float, nargs=2, default=[0.0, 0.0], metavar=("MIN", "MAX"),
+                        help="pad speed range in m/s, sampled per episode with a random heading; 0 0 = static")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -63,6 +71,7 @@ def main() -> None:
     env = make_vec_env(LandingAviary,
                        n_envs=args.n_envs,
                        seed=args.seed,
+                       env_kwargs={"pad_speed_range": tuple(args.pad_speed)},
                        vec_env_cls=SubprocVecEnv,
                        monitor_dir=str(run_dir / "monitor"),
                        monitor_kwargs={"info_keywords": ("outcome", "touchdown_speed", "touchdown_offset")})
