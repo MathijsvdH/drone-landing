@@ -42,9 +42,13 @@ class LandingAviary(BaseRLAviary):
                  speed_limit: float = 1.0,
                  episode_len_sec: float = 15.0,
                  pad_speed_range: tuple[float, float] = (0.0, 0.0),
+                 own_velocity_obs: bool = False,
                  ):
         self.EPISODE_LEN_SEC = episode_len_sec
         self.pad_speed_range = pad_speed_range  # m/s, sampled per episode; (0, 0) = static pad
+        # Set before super().__init__, which already calls _observationSpace
+        self.own_velocity_obs = own_velocity_obs
+        self.obs_size = 15 if own_velocity_obs else 12
         self.pad_pos = np.array([0.0, 0.0, PAD_HEIGHT])  # centre of the pad's top surface
         self.pad_vel = np.zeros(3)
         super().__init__(drone_model=drone_model,
@@ -101,14 +105,20 @@ class LandingAviary(BaseRLAviary):
         return super().step(action)
 
     def _observationSpace(self) -> spaces.Box:
-        return spaces.Box(low=-np.inf, high=np.inf, shape=(1, 12), dtype=np.float32)
+        return spaces.Box(low=-np.inf, high=np.inf, shape=(1, self.obs_size), dtype=np.float32)
 
     def _computeObs(self) -> np.ndarray:
         state = self._getDroneStateVector(0)
         rel_pos = self.pad_pos - state[0:3]
         rel_vel = self.pad_vel - state[10:13]
         rpy, ang_vel = state[7:10], state[13:16]
-        return np.hstack([rel_pos, rel_vel, rpy, ang_vel]).reshape(1, 12).astype(np.float32)
+        parts = [rel_pos, rel_vel, rpy, ang_vel]
+        if self.own_velocity_obs:
+            # The drone's own velocity (ego-motion, what an IMU / optical flow gives), not a world position.
+            # With it the policy can work out the pad's velocity: pad_vel = rel_vel + own_vel.
+            # Appended last, so values 0-11 mean the same as in the 12-value observation.
+            parts.append(state[10:13])
+        return np.hstack(parts).reshape(1, self.obs_size).astype(np.float32)
 
     def _computeReward(self) -> float:
         # The library calls this first after each step, so the outcome is decided here

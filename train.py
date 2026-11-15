@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default=None, help="default: ppo_seed<seed>_<timestamp>")
     parser.add_argument("--pad-speed", type=float, nargs=2, default=[0.0, 0.0], metavar=("MIN", "MAX"),
                         help="pad speed range in m/s, sampled per episode with a random heading; 0 0 = static")
+    parser.add_argument("--own-velocity-obs", action="store_true",
+                        help="add the drone's own velocity to the observation (12 -> 15 values)")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -71,7 +73,8 @@ def main() -> None:
     env = make_vec_env(LandingAviary,
                        n_envs=args.n_envs,
                        seed=args.seed,
-                       env_kwargs={"pad_speed_range": tuple(args.pad_speed)},
+                       env_kwargs={"pad_speed_range": tuple(args.pad_speed),
+                                   "own_velocity_obs": args.own_velocity_obs},
                        vec_env_cls=SubprocVecEnv,
                        monitor_dir=str(run_dir / "monitor"),
                        monitor_kwargs={"info_keywords": ("outcome", "touchdown_speed", "touchdown_offset")})

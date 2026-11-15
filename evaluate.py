@@ -25,9 +25,15 @@ def parse_args() -> argparse.Namespace:
                         help="default: eval_seed<seed>.csv next to the model, or in results/pid/ for --pid")
     parser.add_argument("--pad-speed", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad speed range in m/s; default: the model's training range (static for --pid)")
+    parser.add_argument("--own-velocity-obs", action="store_true",
+                        help="PID only: 15-value observation and pad-velocity feedforward "
+                             "(agents always use the observation they were trained with)")
     parser.add_argument("--stochastic", action="store_true", help="sample actions instead of taking the mean")
     parser.add_argument("--gui", action="store_true", help="watch in real time (demo only)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.own_velocity_obs and not args.pid:
+        parser.error("--own-velocity-obs is only for --pid; an agent's observation comes from its config.json")
+    return args
 
 
 class AgentPolicy:
@@ -45,10 +51,17 @@ class AgentPolicy:
         return action
 
 
-def training_pad_speed(model: Path) -> tuple[float, float]:
-    # Runs from before the moving pad have no pad_speed in their config: they trained on a static pad
-    config = json.loads((model.parent / "config.json").read_text())
-    return tuple(config.get("pad_speed", (0.0, 0.0)))
+def training_env_kwargs(model: Path) -> dict:
+    # The env settings a model was trained with, so it is evaluated on the same task and observation.
+    # Checkpoints live in <run>/checkpoints/, so look one folder up as well.
+    config_path = next(path for path in (model.parent / "config.json", model.parent.parent / "config.json")
+                       if path.exists())
+    config = json.loads(config_path.read_text())
+    # Older runs have no pad_speed (static pad) or own_velocity_obs (12-value observation) in their config
+    return {
+        "pad_speed_range": tuple(config.get("pad_speed", (0.0, 0.0))),
+        "own_velocity_obs": config.get("own_velocity_obs", False),
+    }
 
 
 def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, gui: bool) -> dict:
@@ -89,19 +102,24 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
 
 def main() -> None:
     args = parse_args()
-    if args.pad_speed is not None:
-        pad_speed = tuple(args.pad_speed)
+    if args.pid:
+        env_kwargs = {"pad_speed_range": (0.0, 0.0), "own_velocity_obs": args.own_velocity_obs}
     else:
-        pad_speed = (0.0, 0.0) if args.pid else training_pad_speed(args.model)
-    env = LandingAviary(gui=args.gui, pad_speed_range=pad_speed)
+        env_kwargs = training_env_kwargs(args.model)
+    if args.pad_speed is not None:
+        env_kwargs["pad_speed_range"] = tuple(args.pad_speed)
+    pad_speed = env_kwargs["pad_speed_range"]
+    env = LandingAviary(gui=args.gui, **env_kwargs)
     if args.pid:
         out_dir = Path("results/pid")
-        policy = PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP)
+        policy = PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs)
     else:
         out_dir = args.model.parent
         policy = AgentPolicy(PPO.load(args.model, device="cpu"), deterministic=not args.stochastic)
     # Static-pad files keep their old name; moving-pad files get the speed range in the name
     suffix = f"_pad{pad_speed[0]:g}-{pad_speed[1]:g}" if pad_speed[1] > 0 else ""
+    if args.pid and args.own_velocity_obs:
+        suffix += "_feedforward"  # don't overwrite the plain PID baseline's CSV
     out = args.out or out_dir / f"eval_seed{args.seed}{suffix}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -115,7 +133,7 @@ def main() -> None:
 
     touched = df[df["outcome"].isin(["landed", "bad_landing"])]
     print(f"\n{len(df)} episodes, seeds {args.seed}..{args.seed + args.episodes - 1}, "
-          f"pad speed {pad_speed[0]:g}-{pad_speed[1]:g} m/s")
+          f"pad speed {pad_speed[0]:g}-{pad_speed[1]:g} m/s, {env.obs_size}-value observation")
     print(f"success rate:      {df['success'].mean():.0%}")
     print(f"outcomes:          {df['outcome'].value_counts().to_dict()}")
     if len(touched):

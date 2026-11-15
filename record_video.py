@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from stable_baselines3 import PPO
 
 from envs.landing_aviary import LandingAviary
-from evaluate import training_pad_speed
+from evaluate import training_env_kwargs
 
 WIDTH, HEIGHT = 1280, 720
 HOLD_SECONDS = 1.0  # freeze on the final frame so the touchdown is visible
@@ -43,14 +43,16 @@ def seeds_from_csv(csv: pd.DataFrame, outcomes: list[str] | None, per_outcome: i
     return picked
 
 
-def replay_pad_speed(args: argparse.Namespace, csv: pd.DataFrame | None) -> tuple[float, float]:
+def replay_env_kwargs(args: argparse.Namespace, csv: pd.DataFrame | None) -> dict:
     # The pad speed per seed depends on the range it was sampled from, so a replay must use the
     # same range as the evaluation. A CSV with only static episodes means the range was (0, 0).
+    # The observation always comes from the model's config.json.
+    env_kwargs = training_env_kwargs(args.model)
     if args.pad_speed is not None:
-        return tuple(args.pad_speed)
-    if csv is not None and "pad_speed" in csv and (csv["pad_speed"] == 0).all():
-        return (0.0, 0.0)
-    return training_pad_speed(args.model)
+        env_kwargs["pad_speed_range"] = tuple(args.pad_speed)
+    elif csv is not None and "pad_speed" in csv and (csv["pad_speed"] == 0).all():
+        env_kwargs["pad_speed_range"] = (0.0, 0.0)
+    return env_kwargs
 
 
 def render(env: LandingAviary) -> np.ndarray:
@@ -87,7 +89,7 @@ def main() -> None:
         default_name = "landing.mp4"
     out = args.out or args.model.parent / default_name
     model = PPO.load(args.model, device="cpu")
-    env = LandingAviary(pad_speed_range=replay_pad_speed(args, csv))
+    env = LandingAviary(**replay_env_kwargs(args, csv))
     fps = env.CTRL_FREQ  # one frame per control step = real-time playback
 
     with imageio.get_writer(out, fps=fps, codec="libx264", quality=8) as video:
