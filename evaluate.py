@@ -57,7 +57,8 @@ def training_env_kwargs(model: Path) -> dict:
     config_path = next(path for path in (model.parent / "config.json", model.parent.parent / "config.json")
                        if path.exists())
     config = json.loads(config_path.read_text())
-    # Older runs have no pad_speed (static pad) or own_velocity_obs (12-value observation) in their config
+    # Older runs have no pad_speed (static pad) or own_velocity_obs (12-value observation) in their config.
+    # Training landing limits (safety margin) are left out on purpose: evaluation always uses the milestone limits.
     return {
         "pad_speed_range": tuple(config.get("pad_speed", (0.0, 0.0))),
         "own_velocity_obs": config.get("own_velocity_obs", False),
