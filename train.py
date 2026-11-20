@@ -16,7 +16,8 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from envs.landing_aviary import MAX_TOUCHDOWN_OFFSET, MAX_TOUCHDOWN_SPEED, LandingAviary
+from envs.landing_aviary import (BAD_LANDING_PENALTY, LANDING_REWARD, MAX_TOUCHDOWN_OFFSET, MAX_TOUCHDOWN_SPEED,
+                                 LandingAviary)
 
 OUTCOMES = ("landed", "bad_landing", "crashed", "out_of_bounds", "timeout")
 
@@ -43,6 +44,9 @@ class EpisodeStatsCallback(BaseCallback):
                 if info["outcome"] in ("landed", "bad_landing"):
                     self.logger.record_mean("touchdown/speed", info["touchdown_speed"])
                     self.logger.record_mean("touchdown/offset", info["touchdown_offset"])
+                    # Precision rings (any touchdown, whatever the limits), the same ones evaluation reports
+                    for cm in (2, 3, 5):
+                        self.logger.record_mean(f"touchdown/within_{cm}cm", float(info["touchdown_offset"] < cm / 100))
                 # Success under the milestone criteria that evaluation uses. Equals outcome/landed without a
                 # safety margin, so runs with and without one can be compared on the same curve.
                 self.logger.record_mean("outcome/landed_milestone", float(
@@ -86,6 +90,13 @@ def parse_args() -> argparse.Namespace:
                         help="max touchdown speed (m/s) that counts as landed during training")
     parser.add_argument("--train-touchdown-offset", type=float, default=MAX_TOUCHDOWN_OFFSET,
                         help="max distance to the pad centre (m) that counts as landed during training")
+    parser.add_argument("--action-rate-limit", type=float, default=None,
+                        help="max change of the velocity command per control step (m/s); adds 3 values to the observation")
+    parser.add_argument("--landing-reward-edge", type=float, default=LANDING_REWARD,
+                        help="landing reward at the edge of the allowed offset, linear up to the full reward at the "
+                             "centre (precision); default = flat reward")
+    parser.add_argument("--bad-landing-penalty", type=float, default=BAD_LANDING_PENALTY,
+                        help="reward for touching the pad too fast or off-centre (a miss)")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -104,7 +115,10 @@ def main() -> None:
     env_kwargs = {"pad_speed_range": tuple(args.pad_speed),
                   "own_velocity_obs": args.own_velocity_obs,
                   "touchdown_speed_limit": args.train_touchdown_speed,
-                  "touchdown_offset_limit": args.train_touchdown_offset}
+                  "touchdown_offset_limit": args.train_touchdown_offset,
+                  "action_rate_limit": args.action_rate_limit,
+                  "landing_reward_edge": args.landing_reward_edge,
+                  "bad_landing_penalty": args.bad_landing_penalty}
     # env_kwargs and the commit are a record of exactly what was trained; evaluate.py reads the flat keys
     config = {**vars(args), "env_kwargs": env_kwargs, "git_commit": git_commit()}
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))

@@ -28,11 +28,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--own-velocity-obs", action="store_true",
                         help="PID only: 15-value observation and pad-velocity feedforward "
                              "(agents always use the observation they were trained with)")
+    parser.add_argument("--action-rate-limit", type=float, default=None,
+                        help="PID only: max change of the velocity command per step (m/s), the same safety layer "
+                             "the agent was trained with (agents use the limit from their config.json)")
     parser.add_argument("--stochastic", action="store_true", help="sample actions instead of taking the mean")
     parser.add_argument("--gui", action="store_true", help="watch in real time (demo only)")
     args = parser.parse_args()
     if args.own_velocity_obs and not args.pid:
         parser.error("--own-velocity-obs is only for --pid; an agent's observation comes from its config.json")
+    if args.action_rate_limit is not None and not args.pid:
+        parser.error("--action-rate-limit is only for --pid; an agent's limit comes from its config.json")
     return args
 
 
@@ -58,10 +63,12 @@ def training_env_kwargs(model: Path) -> dict:
                        if path.exists())
     config = json.loads(config_path.read_text())
     # Older runs have no pad_speed (static pad) or own_velocity_obs (12-value observation) in their config.
-    # Training landing limits (safety margin) are left out on purpose: evaluation always uses the milestone limits.
+    # Training landing limits (safety margin) and reward settings are left out on purpose: evaluation always uses the
+    # milestone limits, and rewards don't change the outcome (only the CSV's return column).
     return {
         "pad_speed_range": tuple(config.get("pad_speed", (0.0, 0.0))),
         "own_velocity_obs": config.get("own_velocity_obs", False),
+        "action_rate_limit": config.get("action_rate_limit"),  # None for runs before run 6
     }
 
 
@@ -72,10 +79,14 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
     pad_vel = env.pad_vel.copy()
     reward_sums: dict[str, float] = {}
     total, steps, wall_start = 0.0, 0, time.time()
+    max_speed, max_tilt = 0.0, 0.0  # in-flight safety: loss of control shows here even when the landing still counts
     while True:
         obs, reward, terminated, truncated, info = env.step(policy.act(obs))
         total += reward
         steps += 1
+        state = env._getDroneStateVector(0)
+        max_speed = max(max_speed, float(np.linalg.norm(state[10:13])))
+        max_tilt = max(max_tilt, float(np.degrees(max(abs(state[7]), abs(state[8])))))
         for key, value in info.items():
             if key.startswith("reward/"):
                 reward_sums[key] = reward_sums.get(key, 0.0) + value
@@ -92,6 +103,8 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
         "return": total,
         "touchdown_speed": info["touchdown_speed"],
         "touchdown_offset": info["touchdown_offset"],
+        "max_speed": max_speed,
+        "max_tilt_deg": max_tilt,
         "start_x": start[0],
         "start_y": start[1],
         "start_z": start[2],
@@ -104,7 +117,8 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
 def main() -> None:
     args = parse_args()
     if args.pid:
-        env_kwargs = {"pad_speed_range": (0.0, 0.0), "own_velocity_obs": args.own_velocity_obs}
+        env_kwargs = {"pad_speed_range": (0.0, 0.0), "own_velocity_obs": args.own_velocity_obs,
+                      "action_rate_limit": args.action_rate_limit}
     else:
         env_kwargs = training_env_kwargs(args.model)
     if args.pad_speed is not None:
@@ -121,6 +135,8 @@ def main() -> None:
     suffix = f"_pad{pad_speed[0]:g}-{pad_speed[1]:g}" if pad_speed[1] > 0 else ""
     if args.pid and args.own_velocity_obs:
         suffix += "_feedforward"  # don't overwrite the plain PID baseline's CSV
+    if args.pid and args.action_rate_limit is not None:
+        suffix += f"_rate{args.action_rate_limit:g}"
     out = args.out or out_dir / f"eval_seed{args.seed}{suffix}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -142,6 +158,9 @@ def main() -> None:
               f"max {touched['touchdown_speed'].max():.3f}")
         print(f"touchdown offset:  median {touched['touchdown_offset'].median():.3f} m, "
               f"max {touched['touchdown_offset'].max():.3f}")
+    if len(touched):
+        rings = ", ".join(f"{(touched['touchdown_offset'] < cm / 100).mean():.0%} < {cm} cm" for cm in (2, 3, 5))
+        print(f"precision:         {rings}")
     print(f"wrote {out}")
 
 

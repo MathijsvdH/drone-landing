@@ -61,8 +61,9 @@ class PIDLander:
         # can use it directly instead of differencing noisy positions
         v_xy = self.xy.update(rel_pos[0:2], rel_vel[0:2], self.dt)
         if self.feedforward:
-            if obs.size != 15:
-                raise ValueError("feedforward needs the 15-value observation (own_velocity_obs=True)")
+            # Values 12-14 are the own velocity; the rate limiter's applied command (if on) comes after them
+            if obs.size < 15:
+                raise ValueError("feedforward needs the drone's own velocity in the observation (own_velocity_obs=True)")
             # rel_vel = pad_vel - own_vel, so the pad's velocity follows directly. Commanding it makes the
             # drone move with the pad; the PID then only has to correct the remaining position error.
             pad_vel = rel_vel + obs[12:15]
