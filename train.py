@@ -17,7 +17,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 from envs.landing_aviary import (BAD_LANDING_PENALTY, LANDING_REWARD, MAX_TOUCHDOWN_OFFSET, MAX_TOUCHDOWN_SPEED,
                                  LandingAviary)
@@ -149,6 +149,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--relative-action-scale", type=float, default=None,
                         help="actions are a correction (max this many m/s) on top of the pad's velocity instead of an "
                              "absolute velocity (stage 3, residual control); default = absolute")
+    parser.add_argument("--normalize-obs", action=argparse.BooleanOptionalAction, default=False,
+                        help="scale each observation value by its running mean / std (VecNormalize); the statistics "
+                             "are saved next to every checkpoint and used by evaluation")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -195,6 +198,10 @@ def main() -> None:
                        vec_env_cls=SubprocVecEnv,
                        monitor_dir=str(run_dir / "monitor"),
                        monitor_kwargs={"info_keywords": ("outcome", "touchdown_speed", "touchdown_offset")})
+    if args.normalize_obs:
+        # Stage 3: own velocity reaches ~8 m/s while the relative position that decides a landing is ~0.3 m, so the
+        # raw inputs differ ~15x in scale. Rewards stay raw: the reward is the thing we compare between runs.
+        env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=args.gamma)
 
     model = PPO("MlpPolicy", env,
                 learning_rate=args.learning_rate,
@@ -209,11 +216,14 @@ def main() -> None:
 
     checkpoints = CheckpointCallback(save_freq=max(args.checkpoint_freq // args.n_envs, 1),
                                      save_path=str(run_dir / "checkpoints"),
-                                     name_prefix="model")
+                                     name_prefix="model",
+                                     save_vecnormalize=True)  # only does something with --normalize-obs
     model.learn(total_timesteps=args.timesteps,
                 callback=CallbackList([EpisodeStatsCallback(), checkpoints, StopAtTimesteps(args.timesteps)]),
                 tb_log_name="tb")
     model.save(run_dir / "model")
+    if args.normalize_obs:
+        env.save(str(run_dir / "vecnormalize.pkl"))
     env.close()
     print(f"Saved model to {run_dir / 'model.zip'}")
 

@@ -8,10 +8,9 @@ from pathlib import Path
 import imageio.v2 as imageio
 import numpy as np
 from PIL import Image
-from stable_baselines3 import PPO
 
 from envs.landing_aviary import LandingAviary
-from evaluate import AgentPolicy, training_env_kwargs
+from evaluate import AgentPolicy, load_agent, training_env_kwargs
 from pid_baseline import STAGE3_GAINS, PIDLander
 from record_video import HOLD_SECONDS, caption, render, reset_with_floor, video_env
 
@@ -33,7 +32,7 @@ def make_policy(path: Path, env: LandingAviary) -> AgentPolicy | PIDLander:
     if str(path) == "pid":
         gains = STAGE3_GAINS if env.pad_accel_range is not None else {}
         return PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=env.own_velocity_obs, **gains)
-    return AgentPolicy(PPO.load(path, device="cpu"), deterministic=True)
+    return load_agent(path, deterministic=True)
 
 
 def episode(path: Path, env_kwargs: dict, label: str, seed: int) -> list[np.ndarray]:

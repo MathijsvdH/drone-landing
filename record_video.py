@@ -6,10 +6,9 @@ import numpy as np
 import pandas as pd
 import pybullet as p
 from PIL import Image, ImageDraw
-from stable_baselines3 import PPO
 
 from envs.landing_aviary import LandingAviary
-from evaluate import checkpoint_label, run_dir, training_env_kwargs
+from evaluate import checkpoint_label, load_agent, run_dir, training_env_kwargs
 
 WIDTH, HEIGHT = 1280, 720
 HOLD_SECONDS = 1.0  # freeze on the final frame so the touchdown is visible
@@ -108,7 +107,7 @@ def main() -> None:
         default_name = f"{checkpoint_label(args.model)}_seeds_{'_'.join(str(seed) for seed in args.seeds)}.mp4"
     out = args.out or run_dir(args.model) / "videos" / default_name
     out.parent.mkdir(parents=True, exist_ok=True)
-    model = PPO.load(args.model, device="cpu")
+    policy = load_agent(args.model, deterministic=True)
     env = video_env(**replay_env_kwargs(args, csv))
     fps = env.CTRL_FREQ  # one frame per control step = real-time playback
 
@@ -120,8 +119,7 @@ def main() -> None:
                 t = env.step_counter / env.PYB_FREQ
                 now = f"pad {np.linalg.norm(env.pad_vel):.2f} m/s"  # current speed: it changes in stage 3
                 video.append_data(caption(render(env), f"seed {seed}   {now}   t = {t:4.1f} s"))
-                action, _ = model.predict(obs, deterministic=True)
-                obs, _, terminated, truncated, info = env.step(action)
+                obs, _, terminated, truncated, info = env.step(policy.act(obs))
                 if terminated or truncated:
                     break
             result = info["outcome"]

@@ -7,6 +7,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 import argparse
 import json
 import multiprocessing
+import pickle
 import time
 from pathlib import Path
 
@@ -74,14 +75,17 @@ def parse_args() -> argparse.Namespace:
 class AgentPolicy:
     # Same reset/act interface as PIDLander, so both run through the exact same episode loop
 
-    def __init__(self, model: PPO, deterministic: bool):
+    def __init__(self, model: PPO, deterministic: bool, normalizer=None):
         self.model = model
         self.deterministic = deterministic
+        self.normalizer = normalizer  # the training run's VecNormalize statistics (frozen), or None
 
     def reset(self) -> None:
         pass
 
     def act(self, obs):
+        if self.normalizer is not None:
+            obs = self.normalizer.normalize_obs(obs)
         action, _ = self.model.predict(obs, deterministic=self.deterministic)
         return action
 
@@ -98,12 +102,16 @@ def checkpoint_label(model: Path) -> str:
     return "final" if model.stem == "model" else model.stem
 
 
-def training_env_kwargs(model: Path) -> dict:
-    # The env settings a model was trained with, so it is evaluated on the same task and observation.
-    # Checkpoints live in <run>/checkpoints/, so look one folder up as well.
+def training_config(model: Path) -> dict:
+    # Checkpoints live in <run>/checkpoints/, so look one folder up as well
     config_path = next(path for path in (model.parent / "config.json", model.parent.parent / "config.json")
                        if path.exists())
-    config = json.loads(config_path.read_text())
+    return json.loads(config_path.read_text())
+
+
+def training_env_kwargs(model: Path) -> dict:
+    # The env settings a model was trained with, so it is evaluated on the same task and observation
+    config = training_config(model)
     # Older runs have no pad_speed (static pad) or own_velocity_obs (12-value observation) in their config.
     # Training landing limits (safety margin) and reward settings are left out on purpose: evaluation always uses the
     # milestone limits, and rewards don't change the outcome (only the CSV's return column).
@@ -166,11 +174,24 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
     }
 
 
+def load_agent(model: Path, deterministic: bool) -> AgentPolicy:
+    # A model trained with --normalize-obs only works with the statistics saved at the same step:
+    # checkpoints/model_<steps>_steps.zip -> checkpoints/model_vecnormalize_<steps>_steps.pkl, model.zip -> vecnormalize.pkl
+    normalizer = None
+    if training_config(model).get("normalize_obs"):
+        stats = (model.with_name(model.name.replace("model_", "model_vecnormalize_")).with_suffix(".pkl")
+                 if model.parent.name == "checkpoints" else model.parent / "vecnormalize.pkl")
+        with open(stats, "rb") as file:
+            normalizer = pickle.load(file)
+        normalizer.training = False  # frozen: evaluation must not change the statistics
+    return AgentPolicy(PPO.load(model, device="cpu"), deterministic, normalizer)
+
+
 def make_policy(args: argparse.Namespace, env: LandingAviary) -> AgentPolicy | PIDLander:
     if args.pid:
         gains = STAGE3_GAINS if args.pid_stage3 else {}
         return PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs, **gains)
-    return AgentPolicy(PPO.load(args.model, device="cpu"), deterministic=not args.stochastic)
+    return load_agent(args.model, deterministic=not args.stochastic)
 
 
 def run_seeds(job: tuple) -> tuple[list[dict], int]:
