@@ -18,6 +18,10 @@ DESCENT_GAIN = 0.6  # descent speed per metre of height above the pad
 MIN_DESCENT = 0.15  # m/s; keep moving down at the end instead of hovering just above the pad
 MAX_DESCENT = 0.5  # m/s; well under the 1.0 m/s speed limit
 
+# Stage 3 (vehicle at 4-8.33 m/s, speeding up / braking at 1-2 m/s^2, drag), tuned with pid_tune.py on seeds 500-599:
+# 91% in ~10.7 s. Acceleration lead and steady-only descent did not help (2026-11-24, see docs/experiments.md).
+STAGE3_GAINS = {"kp": 2.4, "ki": 1.0, "accel_lead": 0.0, "align_radius": 0.15}
+
 
 class PID:
 
@@ -39,10 +43,17 @@ class PIDLander:
     # feedforward needs the 15-value observation (own velocity), the same information the run-4 agent gets
     def __init__(self, speed_limit: float, dt: float, kp: float = KP_XY, ki: float | None = None,
                  align_radius: float = ALIGN_RADIUS, descent_gain: float = DESCENT_GAIN,
-                 min_descent: float = MIN_DESCENT, max_descent: float = MAX_DESCENT, feedforward: bool = False):
+                 min_descent: float = MIN_DESCENT, max_descent: float = MAX_DESCENT, feedforward: bool = False,
+                 accel_lead: float = 0.0, steady_descent: bool = False):
         self.speed_limit = speed_limit
         self.dt = dt
         self.feedforward = feedforward
+        # Stage 3: the vehicle broadcasts its acceleration (values 18-20). Commanding where the pad's velocity will be
+        # accel_lead seconds from now makes up for the lag of the rate limiter and the inner velocity loop.
+        self.accel_lead = accel_lead
+        # Stage 3: only descend while the vehicle drives at a steady speed (broadcast acceleration 0), and hold height
+        # while it brakes or speeds up; landing during a speed change is where the touchdown drifts off-centre
+        self.steady_descent = steady_descent
         if ki is None:
             ki = KI_XY_FEEDFORWARD if feedforward else KI_XY
         self.xy = PID(kp, ki, KD_XY, I_LIMIT_XY)
@@ -68,9 +79,17 @@ class PIDLander:
             # drone move with the pad; the PID then only has to correct the remaining position error.
             pad_vel = rel_vel + obs[12:15]
             v_xy = v_xy + pad_vel[0:2]
+        if self.accel_lead or self.steady_descent:
+            if obs.size < 21:
+                raise ValueError("accel_lead needs the pad's acceleration in the observation (pad_accel_obs=True)")
+            v_xy = v_xy + self.accel_lead * obs[18:20]
+        if self.steady_descent and np.linalg.norm(obs[18:20]) > 0:
+            alignment_allowed = 0.0
+        else:
+            alignment_allowed = 1.0
 
         height = -rel_pos[2]
-        alignment = max(0.0, 1.0 - np.linalg.norm(rel_pos[0:2]) / self.align_radius)
+        alignment = alignment_allowed * max(0.0, 1.0 - np.linalg.norm(rel_pos[0:2]) / self.align_radius)
         descent = np.clip(self.descent_gain * height, self.min_descent, self.max_descent)
         v_z = -alignment * descent
 

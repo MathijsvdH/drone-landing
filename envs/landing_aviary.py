@@ -64,6 +64,7 @@ class LandingAviary(BaseRLAviary):
                  start_following: bool = False,
                  pad_per_physics_step: bool = False,
                  pad_accel_range: tuple[float, float] | None = None,
+                 pad_accel_obs: bool = False,
                  ):
         self.EPISODE_LEN_SEC = episode_len_sec
         self.pad_speed_range = pad_speed_range  # m/s, sampled per episode; (0, 0) = static pad
@@ -80,7 +81,10 @@ class LandingAviary(BaseRLAviary):
         # Max change of the velocity command per control step (m/s); None = commands applied as they come
         self.action_rate_limit = action_rate_limit
         self.applied_cmd = np.zeros(3)
-        self.obs_size = 12 + 3 * own_velocity_obs + 3 * (action_rate_limit is not None)
+        # The vehicle broadcasts its current acceleration (stage 3, like a datalink from a cooperative vehicle)
+        self.pad_accel_obs = pad_accel_obs
+        self.pad_acc = np.zeros(3)
+        self.obs_size = 12 + 3 * own_velocity_obs + 3 * (action_rate_limit is not None) + 3 * pad_accel_obs
         self.pad_pos = np.array([0.0, 0.0, PAD_HEIGHT])  # centre of the pad's top surface
         self.pad_vel = np.zeros(3)
         # A landing only counts as "landed" under these limits. Training can make them stricter than the
@@ -137,6 +141,7 @@ class LandingAviary(BaseRLAviary):
         self.pad_vel = speed * np.array([np.cos(heading), np.sin(heading), 0.0])
         self.pad_heading = np.array([np.cos(heading), np.sin(heading), 0.0])
         self.pad_time = 0.0
+        self.pad_acc = np.zeros(3)
         # Extra draws only when a setting is on, after all the others, so default episodes don't change
         follow_error = np.zeros(3)
         if self.start_following:
@@ -236,8 +241,9 @@ class LandingAviary(BaseRLAviary):
         target = next((v for start, v in reversed(self.speed_schedule) if start <= self.pad_time),
                       float(np.linalg.norm(self.pad_vel)))
         speed = float(np.linalg.norm(self.pad_vel))
-        speed += np.clip(target - speed, -self.pad_accel * dt, self.pad_accel * dt)
-        self.pad_vel = speed * self.pad_heading
+        change = float(np.clip(target - speed, -self.pad_accel * dt, self.pad_accel * dt))
+        self.pad_vel = (speed + change) * self.pad_heading
+        self.pad_acc = change / dt * self.pad_heading  # what the vehicle broadcasts: +-pad_accel, or 0 at its target
 
     def _limitActionRate(self, action: np.ndarray) -> np.ndarray:
         # Safety layer between policy and drone: the velocity command may change by at most action_rate_limit per
@@ -275,6 +281,10 @@ class LandingAviary(BaseRLAviary):
             # With the limiter, what the drone does depends on the command applied last step, so the policy has to
             # see it (Markov property). Appended last, so the earlier values keep their meaning.
             parts.append(self.applied_cmd)
+        if self.pad_accel_obs:
+            # The pad's acceleration can't be inferred from one snapshot; without it a braking vehicle is only noticed
+            # once the relative velocity has already built up. Appended last, so the earlier values keep their meaning.
+            parts.append(self.pad_acc)
         return np.hstack(parts).reshape(1, self.obs_size).astype(np.float32)
 
     def _computeReward(self) -> float:

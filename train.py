@@ -116,6 +116,8 @@ def parse_args() -> argparse.Namespace:
                         help="move the pad every physics step instead of every control step (needed for fast pads)")
     parser.add_argument("--pad-accel", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad changes speed within --pad-speed, accelerating/braking at this rate (m/s^2)")
+    parser.add_argument("--pad-accel-obs", action="store_true",
+                        help="the pad broadcasts its acceleration: 3 values appended to the observation (stage 3)")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -143,7 +145,8 @@ def main() -> None:
                   "drag": args.drag,
                   "start_following": args.start_following,
                   "pad_per_physics_step": args.pad_per_physics_step,
-                  "pad_accel_range": tuple(args.pad_accel) if args.pad_accel else None}
+                  "pad_accel_range": tuple(args.pad_accel) if args.pad_accel else None,
+                  "pad_accel_obs": args.pad_accel_obs}
     # env_kwargs and the commit are a record of exactly what was trained; evaluate.py reads the flat keys
     config = {**vars(args), "env_kwargs": env_kwargs, "git_commit": git_commit(),
               "omp_num_threads": os.environ["OMP_NUM_THREADS"]}

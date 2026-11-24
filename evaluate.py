@@ -17,7 +17,7 @@ from stable_baselines3 import PPO
 from gym_pybullet_drones.utils.utils import sync
 
 from envs.landing_aviary import LandingAviary
-from pid_baseline import PIDLander
+from pid_baseline import STAGE3_GAINS, PIDLander
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pad-per-physics-step", action="store_true", help="move the pad every physics step")
     parser.add_argument("--pad-accel", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad changes speed, accelerating/braking at this rate (m/s^2)")
+    parser.add_argument("--pid-stage3", action="store_true",
+                        help="PID only: the gains tuned for stage 3 (pid_baseline.STAGE3_GAINS) instead of stage 2")
+    parser.add_argument("--pad-accel-obs", action="store_true",
+                        help="PID only: the pad's acceleration in the observation (agents use their config.json)")
     parser.add_argument("--stochastic", action="store_true", help="sample actions instead of taking the mean")
     parser.add_argument("--gui", action="store_true", help="watch in real time (demo only)")
     args = parser.parse_args()
@@ -58,6 +62,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--action-rate-limit is only for --pid; an agent's limit comes from its config.json")
     if args.speed_limit is not None and not args.pid:
         parser.error("--speed-limit is only for --pid; it changes what an agent's actions mean")
+    if args.pid_stage3 and not args.pid:
+        parser.error("--pid-stage3 is only for --pid")
+    if args.pad_accel_obs and not args.pid:
+        parser.error("--pad-accel-obs is only for --pid; an agent's observation comes from its config.json")
     if args.gui and args.workers > 1:
         parser.error("--gui needs --workers 1")
     return args
@@ -109,6 +117,7 @@ def training_env_kwargs(model: Path) -> dict:
         "start_following": config.get("start_following", False),
         "pad_per_physics_step": config.get("pad_per_physics_step", False),
         "pad_accel_range": tuple(config["pad_accel"]) if config.get("pad_accel") else None,
+        "pad_accel_obs": config.get("pad_accel_obs", False),
     }
 
 
@@ -158,7 +167,8 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
 
 def make_policy(args: argparse.Namespace, env: LandingAviary) -> AgentPolicy | PIDLander:
     if args.pid:
-        return PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs)
+        gains = STAGE3_GAINS if args.pid_stage3 else {}
+        return PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs, **gains)
     return AgentPolicy(PPO.load(args.model, device="cpu"), deterministic=not args.stochastic)
 
 
@@ -181,6 +191,8 @@ def default_out(args: argparse.Namespace, pad_speed: tuple) -> Path:
         name = "pid" + ("_ff" if args.own_velocity_obs else "")
         name += f"_rate{args.action_rate_limit:g}" if args.action_rate_limit is not None else ""
         name += f"_vmax{args.speed_limit:g}" if args.speed_limit is not None else ""
+        name += "_accelobs" if args.pad_accel_obs else ""
+        name += "_stage3gains" if args.pid_stage3 else ""
     else:
         folder = run_dir(args.model) / "eval"
         name = checkpoint_label(args.model) + ("_stochastic" if args.stochastic else "")
@@ -199,7 +211,8 @@ def main() -> None:
     if args.pid:
         env_kwargs = {"pad_speed_range": (0.0, 0.0), "own_velocity_obs": args.own_velocity_obs,
                       "action_rate_limit": args.action_rate_limit,
-                      "speed_limit": args.speed_limit if args.speed_limit is not None else 1.0}
+                      "speed_limit": args.speed_limit if args.speed_limit is not None else 1.0,
+                      "pad_accel_obs": args.pad_accel_obs}
     else:
         env_kwargs = training_env_kwargs(args.model)
     if args.pad_speed is not None:
