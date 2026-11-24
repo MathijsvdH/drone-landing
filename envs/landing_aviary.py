@@ -65,6 +65,7 @@ class LandingAviary(BaseRLAviary):
                  pad_per_physics_step: bool = False,
                  pad_accel_range: tuple[float, float] | None = None,
                  pad_accel_obs: bool = False,
+                 relative_action_scale: float | None = None,
                  ):
         self.EPISODE_LEN_SEC = episode_len_sec
         self.pad_speed_range = pad_speed_range  # m/s, sampled per episode; (0, 0) = static pad
@@ -81,6 +82,11 @@ class LandingAviary(BaseRLAviary):
         # Max change of the velocity command per control step (m/s); None = commands applied as they come
         self.action_rate_limit = action_rate_limit
         self.applied_cmd = np.zeros(3)
+        # Actions relative to the pad (stage 3, residual control): the action is a correction of at most this many m/s
+        # on top of the pad's velocity, instead of an absolute velocity up to the speed limit. With speed limit 10 an
+        # absolute action turns exploration noise into +-3 m/s; relative to the pad it stays at stage 2's scale.
+        # None = absolute velocity actions, as before.
+        self.relative_action_scale = relative_action_scale
         # The vehicle broadcasts its current acceleration (stage 3, like a datalink from a cooperative vehicle)
         self.pad_accel_obs = pad_accel_obs
         self.pad_acc = np.zeros(3)
@@ -207,6 +213,8 @@ class LandingAviary(BaseRLAviary):
         # body), which is fine because the episode ends at the first contact anyway.
         if not self.pad_per_physics_step:
             self._advancePad(self.CTRL_TIMESTEP)
+        if self.relative_action_scale is not None:
+            action = self._relativeToAbsolute(action)
         if self.action_rate_limit is not None:
             action = self._limitActionRate(action)
         return super().step(action)
@@ -245,6 +253,19 @@ class LandingAviary(BaseRLAviary):
         self.pad_vel = (speed + change) * self.pad_heading
         self.pad_acc = change / dt * self.pad_heading  # what the vehicle broadcasts: +-pad_accel, or 0 at its target
 
+    def _relativeToAbsolute(self, action: np.ndarray) -> np.ndarray:
+        # Same action format as the library's VEL action, read as a correction on top of the pad's velocity (what a
+        # flight stack's guidance layer does with the target's velocity from the datalink). Output: the library's
+        # format for the absolute velocity, so the rate limiter and the inner loop work exactly as before.
+        a = np.asarray(action, dtype=float).reshape(4)
+        norm = np.linalg.norm(a[0:3])
+        correction = self.relative_action_scale * abs(a[3]) * (a[0:3] / norm if norm > 0 else np.zeros(3))
+        velocity = self.pad_vel + correction
+        speed = np.linalg.norm(velocity)
+        if speed == 0:
+            return np.zeros((1, 4))
+        return np.hstack([velocity / speed, min(speed / self.SPEED_LIMIT, 1.0)]).reshape(1, 4)
+
     def _limitActionRate(self, action: np.ndarray) -> np.ndarray:
         # Safety layer between policy and drone: the velocity command may change by at most action_rate_limit per
         # step (0.08 m/s per 33 ms = 2.4 m/s^2). Faster changes wind up the library's lagging inner loop (ramp test,
@@ -280,7 +301,9 @@ class LandingAviary(BaseRLAviary):
         if self.action_rate_limit is not None:
             # With the limiter, what the drone does depends on the command applied last step, so the policy has to
             # see it (Markov property). Appended last, so the earlier values keep their meaning.
-            parts.append(self.applied_cmd)
+            # With relative actions it is shown in the same frame as the action (relative to the pad).
+            relative = self.relative_action_scale is not None
+            parts.append(self.applied_cmd - self.pad_vel if relative else self.applied_cmd)
         if self.pad_accel_obs:
             # The pad's acceleration can't be inferred from one snapshot; without it a braking vehicle is only noticed
             # once the relative velocity has already built up. Appended last, so the earlier values keep their meaning.

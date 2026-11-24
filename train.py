@@ -81,15 +81,43 @@ def git_commit() -> str:
     return git("rev-parse", "--short", "HEAD") + ("-dirty" if git("status", "--porcelain") else "")
 
 
+# Named recipes so a run is one short command. A preset only changes the defaults: any flag given on the command line
+# still wins, and config.json records every resolved setting (and the preset name), so nothing is hidden.
+# The library-style defaults below stay as they were, so the long commands in docs/ keep their meaning.
+STAGE2 = {  # run 8: moving pad, safety margin, rate limiter, landing reward graded on offset and touchdown speed
+    "timesteps": 5_000_000,
+    "pad_speed": [0.2, 0.5],
+    "own_velocity_obs": True,
+    "train_touchdown_speed": 0.35,
+    "train_touchdown_offset": 0.07,
+    "action_rate_limit": 0.08,
+    "landing_reward_edge": 50.0,
+    "landing_speed_reward_edge": 50.0,
+}
+STAGE3 = {  # stage 2's recipe on a vehicle at 4-30 km/h that speeds up and brakes at 1-2 m/s^2 (2026-11-24)
+    **STAGE2,
+    "pad_speed": [4.0, 8.33],
+    "speed_limit": 10.0,
+    "drag": True,
+    "start_following": True,
+    "pad_per_physics_step": True,
+    "pad_accel": [1.0, 2.0],
+    "pad_accel_obs": True,
+}
+PRESETS = {"stage2": STAGE2, "stage3": STAGE3}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a PPO agent on LandingAviary.")
+    parser.add_argument("--preset", choices=PRESETS, default=None,
+                        help="named recipe (see PRESETS); flags given explicitly override it")
     parser.add_argument("--timesteps", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-envs", type=int, default=8, help="parallel environments (one process each)")
     parser.add_argument("--run-name", type=str, default=None, help="default: ppo_seed<seed>_<timestamp>")
     parser.add_argument("--pad-speed", type=float, nargs=2, default=[0.0, 0.0], metavar=("MIN", "MAX"),
                         help="pad speed range in m/s, sampled per episode with a random heading; 0 0 = static")
-    parser.add_argument("--own-velocity-obs", action="store_true",
+    parser.add_argument("--own-velocity-obs", action=argparse.BooleanOptionalAction, default=False,
                         help="add the drone's own velocity to the observation (12 -> 15 values)")
     # Safety margin: train against stricter landing limits than the milestone. Evaluation always uses the milestone.
     parser.add_argument("--train-touchdown-speed", type=float, default=MAX_TOUCHDOWN_SPEED,
@@ -109,15 +137,18 @@ def parse_args() -> argparse.Namespace:
     # Fast pad / changing speed (all off by default)
     parser.add_argument("--speed-limit", type=float, default=1.0,
                         help="max commanded speed (m/s); must exceed the pad speed (e.g. 10 for a 30 km/h pad)")
-    parser.add_argument("--drag", action="store_true", help="air drag on (Physics.PYB_DRAG)")
-    parser.add_argument("--start-following", action="store_true",
+    parser.add_argument("--drag", action=argparse.BooleanOptionalAction, default=False, help="air drag on (Physics.PYB_DRAG)")
+    parser.add_argument("--start-following", action=argparse.BooleanOptionalAction, default=False,
                         help="drone starts flying along with the pad (+- 0.5 m/s) instead of hovering")
-    parser.add_argument("--pad-per-physics-step", action="store_true",
+    parser.add_argument("--pad-per-physics-step", action=argparse.BooleanOptionalAction, default=False,
                         help="move the pad every physics step instead of every control step (needed for fast pads)")
     parser.add_argument("--pad-accel", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad changes speed within --pad-speed, accelerating/braking at this rate (m/s^2)")
-    parser.add_argument("--pad-accel-obs", action="store_true",
+    parser.add_argument("--pad-accel-obs", action=argparse.BooleanOptionalAction, default=False,
                         help="the pad broadcasts its acceleration: 3 values appended to the observation (stage 3)")
+    parser.add_argument("--relative-action-scale", type=float, default=None,
+                        help="actions are a correction (max this many m/s) on top of the pad's velocity instead of an "
+                             "absolute velocity (stage 3, residual control); default = absolute")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -125,6 +156,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--n-epochs", type=int, default=10)
     parser.add_argument("--gamma", type=float, default=0.99)
+    preset = parser.parse_known_args()[0].preset
+    if preset:
+        parser.set_defaults(**PRESETS[preset])
     return parser.parse_args()
 
 
@@ -146,7 +180,8 @@ def main() -> None:
                   "start_following": args.start_following,
                   "pad_per_physics_step": args.pad_per_physics_step,
                   "pad_accel_range": tuple(args.pad_accel) if args.pad_accel else None,
-                  "pad_accel_obs": args.pad_accel_obs}
+                  "pad_accel_obs": args.pad_accel_obs,
+                  "relative_action_scale": args.relative_action_scale}
     # env_kwargs and the commit are a record of exactly what was trained; evaluate.py reads the flat keys
     config = {**vars(args), "env_kwargs": env_kwargs, "git_commit": git_commit(),
               "omp_num_threads": os.environ["OMP_NUM_THREADS"]}

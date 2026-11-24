@@ -55,6 +55,25 @@ def replay_env_kwargs(args: argparse.Namespace, csv: pd.DataFrame | None) -> dic
     return env_kwargs
 
 
+def video_env(**env_kwargs) -> LandingAviary:
+    # The fast reset restores a saved world, which can't hold the extra floor tiles below; the full reset gives the
+    # same episodes (checked bit-identical, 2026-11-19) and is fine for a handful of video episodes
+    return LandingAviary(fast_reset=False, **env_kwargs)
+
+
+def reset_with_floor(env: LandingAviary, seed: int):
+    # The ground is 100 x 100 m visually; a 30 km/h pad drives ~125 m in an episode. Add a ring of visual-only copies
+    # of the ground around it (collisions off, so the physics are untouched). The full reset removes them again.
+    obs, info = env.reset(seed=seed)
+    if env.pad_speed_range[1] > 2.0:
+        for dx in (-100, 0, 100):
+            for dy in (-100, 0, 100):
+                if dx or dy:
+                    tile = p.loadURDF("plane.urdf", [dx, dy, 0], useFixedBase=True, physicsClientId=env.CLIENT)
+                    p.setCollisionFilterGroupMask(tile, -1, 0, 0, physicsClientId=env.CLIENT)
+    return obs, info
+
+
 def render(env: LandingAviary) -> np.ndarray:
     # Camera looks at the point between drone and pad, so both stay in view
     drone = env._getDroneStateVector(0)[0:3]
@@ -90,16 +109,17 @@ def main() -> None:
     out = args.out or run_dir(args.model) / "videos" / default_name
     out.parent.mkdir(parents=True, exist_ok=True)
     model = PPO.load(args.model, device="cpu")
-    env = LandingAviary(**replay_env_kwargs(args, csv))
+    env = video_env(**replay_env_kwargs(args, csv))
     fps = env.CTRL_FREQ  # one frame per control step = real-time playback
 
     with imageio.get_writer(out, fps=fps, codec="libx264", quality=8) as video:
         for seed, expected_outcome in expected.items():
-            obs, _ = env.reset(seed=seed)
+            obs, _ = reset_with_floor(env, seed)
             pad = f"pad {np.linalg.norm(env.pad_vel):.2f} m/s"
             while True:
                 t = env.step_counter / env.PYB_FREQ
-                video.append_data(caption(render(env), f"seed {seed}   {pad}   t = {t:4.1f} s"))
+                now = f"pad {np.linalg.norm(env.pad_vel):.2f} m/s"  # current speed: it changes in stage 3
+                video.append_data(caption(render(env), f"seed {seed}   {now}   t = {t:4.1f} s"))
                 action, _ = model.predict(obs, deterministic=True)
                 obs, _, terminated, truncated, info = env.step(action)
                 if terminated or truncated:

@@ -118,6 +118,7 @@ def training_env_kwargs(model: Path) -> dict:
         "pad_per_physics_step": config.get("pad_per_physics_step", False),
         "pad_accel_range": tuple(config["pad_accel"]) if config.get("pad_accel") else None,
         "pad_accel_obs": config.get("pad_accel_obs", False),
+        "relative_action_scale": config.get("relative_action_scale"),  # None = absolute actions (before stage 3b)
     }
 
 
