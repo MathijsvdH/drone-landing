@@ -15,6 +15,13 @@ PAD_HEIGHT = 0.05
 # Start position relative to the pad centre
 START_XY_RANGE = 1.0  # horizontal offset sampled uniformly in [-range, +range]
 START_Z_RANGE = (1.0, 1.5)  # height above the ground
+# Following start (fast pad): the drone starts with the pad's velocity plus this error per horizontal axis (m/s),
+# like the GPS-following phase before a real landing on a moving vehicle
+FOLLOW_VEL_ERROR = 0.5
+
+# Changing pad speed: the pad drives toward a new target speed (from pad_speed_range) every few seconds,
+# speeding up or braking at an acceleration drawn per episode from pad_accel_range
+SPEED_SEGMENT_SEC = (1.0, 3.0)
 
 # Success criteria (milestone 1). Evaluation always uses these; training can use stricter ones
 MAX_TOUCHDOWN_SPEED = 0.5  # m/s, relative to the pad
@@ -52,9 +59,21 @@ class LandingAviary(BaseRLAviary):
                  action_rate_limit: float | None = None,
                  landing_reward_edge: float = LANDING_REWARD,
                  bad_landing_penalty: float = BAD_LANDING_PENALTY,
+                 drag: bool = False,
+                 start_following: bool = False,
+                 pad_per_physics_step: bool = False,
+                 pad_accel_range: tuple[float, float] | None = None,
                  ):
         self.EPISODE_LEN_SEC = episode_len_sec
         self.pad_speed_range = pad_speed_range  # m/s, sampled per episode; (0, 0) = static pad
+        # Fast-pad settings, all off by default (then episodes are exactly as before):
+        # - start_following: the drone starts flying along with the pad instead of hovering
+        # - pad_per_physics_step: move the pad every physics step (240 Hz) instead of jumping once per control step;
+        #   at 8.3 m/s a control-step jump is 28 cm, which would make the pad leap away under the drone
+        # - pad_accel_range: the pad speeds up and brakes (m/s^2) instead of driving at one constant speed
+        self.start_following = start_following
+        self.pad_per_physics_step = pad_per_physics_step
+        self.pad_accel_range = pad_accel_range
         # Set before super().__init__, which already calls _observationSpace
         self.own_velocity_obs = own_velocity_obs
         # Max change of the velocity command per control step (m/s); None = commands applied as they come
@@ -72,6 +91,8 @@ class LandingAviary(BaseRLAviary):
         self.landing_reward_edge = landing_reward_edge
         self.bad_landing_penalty = bad_landing_penalty
         self.world_state: int | None = None  # saved PyBullet world for the fast reset, set below
+        if drag:
+            physics = Physics.PYB_DRAG  # the library's drag model: air resistance grows with speed and rotor speed
         super().__init__(drone_model=drone_model,
                          num_drones=1,
                          physics=physics,
@@ -109,11 +130,27 @@ class LandingAviary(BaseRLAviary):
         speed = self.np_random.uniform(*self.pad_speed_range)
         self.pad_pos = np.array([0.0, 0.0, PAD_HEIGHT])
         self.pad_vel = speed * np.array([np.cos(heading), np.sin(heading), 0.0])
+        self.pad_heading = np.array([np.cos(heading), np.sin(heading), 0.0])
+        self.pad_time = 0.0
+        # Extra draws only when a setting is on, after all the others, so default episodes don't change
+        follow_error = np.zeros(3)
+        if self.start_following:
+            follow_error[0:2] = self.np_random.uniform(-FOLLOW_VEL_ERROR, FOLLOW_VEL_ERROR, size=2)
+            # Start the pad half an episode's drive before the origin, so a fast pad stays on the ground plane
+            # (its collision box is 200 x 200 m; 8.3 m/s x 15 s = 125 m)
+            self.pad_pos = self.pad_pos - self.pad_vel * self.EPISODE_LEN_SEC / 2
+        if self.pad_accel_range is not None:
+            self.pad_accel = self.np_random.uniform(*self.pad_accel_range)
+            self.speed_schedule = self._drawSpeedSchedule()
         self.INIT_XYZS = np.array([[self.pad_pos[0] + xy[0], self.pad_pos[1] + xy[1], z]])
         if self.world_state is None:
             super()._housekeeping()  # library: zero its counters, (re)load plane, drone and pad
         else:
             self._housekeepingWithoutReload()
+        start_vel = self.pad_vel + follow_error if self.start_following else np.zeros(3)
+        if self.start_following:
+            p.resetBaseVelocity(self.DRONE_IDS[0], linearVelocity=start_vel.tolist(), physicsClientId=self.CLIENT)
+            self._movePadBody()
         self.ctrl[0].reset()  # the library never resets the PID, so integral errors leak between episodes
         self.prev_dist = float(np.linalg.norm(self.pad_pos - self.INIT_XYZS[0]))
         self.prev_rel_vel = np.zeros(3)
@@ -123,7 +160,8 @@ class LandingAviary(BaseRLAviary):
         self.touchdown_offset: float | None = None
         self.too_fast = False  # why a touchdown was a bad landing (both can be true)
         self.off_centre = False
-        self.applied_cmd = np.zeros(3)  # the drone starts at rest, so the rate limiter starts from 0
+        # The rate limiter starts from the drone's start velocity (0 from hover, ~ the pad's velocity when following)
+        self.applied_cmd = start_vel.copy()
 
     def _housekeepingWithoutReload(self):
         # The parts of BaseAviary._housekeeping that step() relies on, without reloading the world.
@@ -157,12 +195,44 @@ class LandingAviary(BaseRLAviary):
         # Move the pad before the physics steps, so the observation and reward at the end of this
         # step see the pad where it was during the step. The pad is teleported (it stays a static
         # body), which is fine because the episode ends at the first contact anyway.
-        self.pad_pos = self.pad_pos + self.pad_vel * self.CTRL_TIMESTEP
-        p.resetBasePositionAndOrientation(self.PAD_ID, [self.pad_pos[0], self.pad_pos[1], PAD_HEIGHT / 2],
-                                          [0, 0, 0, 1], physicsClientId=self.CLIENT)
+        if not self.pad_per_physics_step:
+            self._advancePad(self.CTRL_TIMESTEP)
         if self.action_rate_limit is not None:
             action = self._limitActionRate(action)
         return super().step(action)
+
+    def _physics(self, rpm, nth_drone):
+        # The library calls this once per physics step, right before stepSimulation (also with drag on)
+        if self.pad_per_physics_step:
+            self._advancePad(self.PYB_TIMESTEP)
+        super()._physics(rpm, nth_drone)
+
+    def _advancePad(self, dt: float) -> None:
+        if self.pad_accel_range is not None:
+            self._updatePadSpeed(dt)
+        self.pad_pos = self.pad_pos + self.pad_vel * dt
+        self._movePadBody()
+
+    def _movePadBody(self) -> None:
+        p.resetBasePositionAndOrientation(self.PAD_ID, [self.pad_pos[0], self.pad_pos[1], PAD_HEIGHT / 2],
+                                          [0, 0, 0, 1], physicsClientId=self.CLIENT)
+
+    def _drawSpeedSchedule(self) -> list[tuple[float, float]]:
+        # (start time, target speed) per segment, drawn at reset so a seed fixes the whole speed profile
+        schedule, t = [], 0.0
+        while t < self.EPISODE_LEN_SEC:
+            t += self.np_random.uniform(*SPEED_SEGMENT_SEC)
+            schedule.append((t, self.np_random.uniform(*self.pad_speed_range)))
+        return schedule
+
+    def _updatePadSpeed(self, dt: float) -> None:
+        # Drive toward the current segment's target speed at the episode's acceleration; heading stays the same
+        self.pad_time += dt
+        target = next((v for start, v in reversed(self.speed_schedule) if start <= self.pad_time),
+                      float(np.linalg.norm(self.pad_vel)))
+        speed = float(np.linalg.norm(self.pad_vel))
+        speed += np.clip(target - speed, -self.pad_accel * dt, self.pad_accel * dt)
+        self.pad_vel = speed * self.pad_heading
 
     def _limitActionRate(self, action: np.ndarray) -> np.ndarray:
         # Safety layer between policy and drone: the velocity command may change by at most action_rate_limit per

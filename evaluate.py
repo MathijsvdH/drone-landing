@@ -31,6 +31,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-rate-limit", type=float, default=None,
                         help="PID only: max change of the velocity command per step (m/s), the same safety layer "
                              "the agent was trained with (agents use the limit from their config.json)")
+    parser.add_argument("--speed-limit", type=float, default=None,
+                        help="PID only: max commanded speed (m/s), default 1.0 (agents use their config.json)")
+    # Task settings: default from an agent's config.json (off for the PID); given here, they override it
+    parser.add_argument("--drag", action="store_true", help="air drag on")
+    parser.add_argument("--start-following", action="store_true", help="drone starts flying along with the pad")
+    parser.add_argument("--pad-per-physics-step", action="store_true", help="move the pad every physics step")
+    parser.add_argument("--pad-accel", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="pad changes speed, accelerating/braking at this rate (m/s^2)")
     parser.add_argument("--stochastic", action="store_true", help="sample actions instead of taking the mean")
     parser.add_argument("--gui", action="store_true", help="watch in real time (demo only)")
     args = parser.parse_args()
@@ -38,6 +46,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--own-velocity-obs is only for --pid; an agent's observation comes from its config.json")
     if args.action_rate_limit is not None and not args.pid:
         parser.error("--action-rate-limit is only for --pid; an agent's limit comes from its config.json")
+    if args.speed_limit is not None and not args.pid:
+        parser.error("--speed-limit is only for --pid; it changes what an agent's actions mean")
     return args
 
 
@@ -69,6 +79,12 @@ def training_env_kwargs(model: Path) -> dict:
         "pad_speed_range": tuple(config.get("pad_speed", (0.0, 0.0))),
         "own_velocity_obs": config.get("own_velocity_obs", False),
         "action_rate_limit": config.get("action_rate_limit"),  # None for runs before run 6
+        # Fast pad / changing speed (runs before 7 don't have these: slow pad, hover start)
+        "speed_limit": config.get("speed_limit", 1.0),
+        "drag": config.get("drag", False),
+        "start_following": config.get("start_following", False),
+        "pad_per_physics_step": config.get("pad_per_physics_step", False),
+        "pad_accel_range": tuple(config["pad_accel"]) if config.get("pad_accel") else None,
     }
 
 
@@ -110,6 +126,8 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
         "start_z": start[2],
         "pad_speed": float(np.linalg.norm(pad_vel)),
         "pad_heading_deg": float(np.degrees(np.arctan2(pad_vel[1], pad_vel[0]))),
+        **({"pad_accel": env.pad_accel, "pad_speed_end": float(np.linalg.norm(env.pad_vel))}
+           if env.pad_accel_range is not None else {}),
         **reward_sums,
     }
 
@@ -118,11 +136,17 @@ def main() -> None:
     args = parse_args()
     if args.pid:
         env_kwargs = {"pad_speed_range": (0.0, 0.0), "own_velocity_obs": args.own_velocity_obs,
-                      "action_rate_limit": args.action_rate_limit}
+                      "action_rate_limit": args.action_rate_limit,
+                      "speed_limit": args.speed_limit if args.speed_limit is not None else 1.0}
     else:
         env_kwargs = training_env_kwargs(args.model)
     if args.pad_speed is not None:
         env_kwargs["pad_speed_range"] = tuple(args.pad_speed)
+    for flag in ("drag", "start_following", "pad_per_physics_step"):
+        if getattr(args, flag):
+            env_kwargs[flag] = True
+    if args.pad_accel is not None:
+        env_kwargs["pad_accel_range"] = tuple(args.pad_accel)
     pad_speed = env_kwargs["pad_speed_range"]
     env = LandingAviary(gui=args.gui, **env_kwargs)
     if args.pid:
@@ -137,6 +161,13 @@ def main() -> None:
         suffix += "_feedforward"  # don't overwrite the plain PID baseline's CSV
     if args.pid and args.action_rate_limit is not None:
         suffix += f"_rate{args.action_rate_limit:g}"
+    if args.pid and args.speed_limit is not None:
+        suffix += f"_vmax{args.speed_limit:g}"
+    # Task settings in the name only when given on the command line (an agent's own task is already its folder)
+    suffix += "".join(f"_{name}" for name, flag in (("drag", args.drag), ("follow", args.start_following),
+                                                     ("pps", args.pad_per_physics_step)) if flag)
+    if args.pad_accel is not None:
+        suffix += f"_accel{args.pad_accel[0]:g}-{args.pad_accel[1]:g}"
     out = args.out or out_dir / f"eval_seed{args.seed}{suffix}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
 

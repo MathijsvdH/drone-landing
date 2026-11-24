@@ -3,6 +3,9 @@ import os
 # Training runs on CPU, but PyTorch's Adam still queries CUDA on every step when a GPU is visible,
 # so disconnecting the GPU for power saving mid-run crashed training. Hide it before torch is imported.
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# The policy only sees batches of 8 observations, too small to split over threads. With the default (one thread per
+# core) torch's idle helper threads busy-wait and took ~7 cores per run away from the simulation workers.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import json
@@ -97,6 +100,16 @@ def parse_args() -> argparse.Namespace:
                              "centre (precision); default = flat reward")
     parser.add_argument("--bad-landing-penalty", type=float, default=BAD_LANDING_PENALTY,
                         help="reward for touching the pad too fast or off-centre (a miss)")
+    # Fast pad / changing speed (all off by default)
+    parser.add_argument("--speed-limit", type=float, default=1.0,
+                        help="max commanded speed (m/s); must exceed the pad speed (e.g. 10 for a 30 km/h pad)")
+    parser.add_argument("--drag", action="store_true", help="air drag on (Physics.PYB_DRAG)")
+    parser.add_argument("--start-following", action="store_true",
+                        help="drone starts flying along with the pad (+- 0.5 m/s) instead of hovering")
+    parser.add_argument("--pad-per-physics-step", action="store_true",
+                        help="move the pad every physics step instead of every control step (needed for fast pads)")
+    parser.add_argument("--pad-accel", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="pad changes speed within --pad-speed, accelerating/braking at this rate (m/s^2)")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total timesteps")
     # PPO hyperparameters, SB3 defaults
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -118,9 +131,15 @@ def main() -> None:
                   "touchdown_offset_limit": args.train_touchdown_offset,
                   "action_rate_limit": args.action_rate_limit,
                   "landing_reward_edge": args.landing_reward_edge,
-                  "bad_landing_penalty": args.bad_landing_penalty}
+                  "bad_landing_penalty": args.bad_landing_penalty,
+                  "speed_limit": args.speed_limit,
+                  "drag": args.drag,
+                  "start_following": args.start_following,
+                  "pad_per_physics_step": args.pad_per_physics_step,
+                  "pad_accel_range": tuple(args.pad_accel) if args.pad_accel else None}
     # env_kwargs and the commit are a record of exactly what was trained; evaluate.py reads the flat keys
-    config = {**vars(args), "env_kwargs": env_kwargs, "git_commit": git_commit()}
+    config = {**vars(args), "env_kwargs": env_kwargs, "git_commit": git_commit(),
+              "omp_num_threads": os.environ["OMP_NUM_THREADS"]}
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
 
     # Each env gets seed + i, so the whole run is reproducible from --seed
