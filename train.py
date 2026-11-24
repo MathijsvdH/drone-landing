@@ -50,6 +50,9 @@ class EpisodeStatsCallback(BaseCallback):
                     # Precision rings (any touchdown, whatever the limits), the same ones evaluation reports
                     for cm in (2, 3, 5):
                         self.logger.record_mean(f"touchdown/within_{cm}cm", float(info["touchdown_offset"] < cm / 100))
+                    # Softness rings (run 8): how many touchdowns stay well under the speed limit
+                    for speed in (0.15, 0.20, 0.25):
+                        self.logger.record_mean(f"touchdown/below_{speed:.2f}ms", float(info["touchdown_speed"] < speed))
                 # Success under the milestone criteria that evaluation uses. Equals outcome/landed without a
                 # safety margin, so runs with and without one can be compared on the same curve.
                 self.logger.record_mean("outcome/landed_milestone", float(
@@ -98,6 +101,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--landing-reward-edge", type=float, default=LANDING_REWARD,
                         help="landing reward at the edge of the allowed offset, linear up to the full reward at the "
                              "centre (precision); default = flat reward")
+    parser.add_argument("--landing-speed-reward-edge", type=float, default=LANDING_REWARD,
+                        help="landing reward at the touchdown speed limit, linear up to the full reward at 0 m/s "
+                             "(softness); default = no speed term")
     parser.add_argument("--bad-landing-penalty", type=float, default=BAD_LANDING_PENALTY,
                         help="reward for touching the pad too fast or off-centre (a miss)")
     # Fast pad / changing speed (all off by default)
@@ -131,6 +137,7 @@ def main() -> None:
                   "touchdown_offset_limit": args.train_touchdown_offset,
                   "action_rate_limit": args.action_rate_limit,
                   "landing_reward_edge": args.landing_reward_edge,
+                  "landing_speed_reward_edge": args.landing_speed_reward_edge,
                   "bad_landing_penalty": args.bad_landing_penalty,
                   "speed_limit": args.speed_limit,
                   "drag": args.drag,

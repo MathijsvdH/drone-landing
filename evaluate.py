@@ -1,5 +1,12 @@
+import os
+
+# One torch thread: the policy sees one observation at a time, and parallel workers would otherwise fight over cores
+# with busy-waiting helper threads (same as train.py; evaluation results are identical either way)
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import json
+import multiprocessing
 import time
 from pathlib import Path
 
@@ -22,7 +29,10 @@ def parse_args() -> argparse.Namespace:
     # Episode i uses seed + i. Default 1000 keeps eval starts apart from the training seeds (0..n_envs-1)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--out", type=Path, default=None,
-                        help="default: eval_seed<seed>.csv next to the model, or in results/pid/ for --pid")
+                        help="default: <run>/eval/<checkpoint>_seed<seed>_n<episodes>[_<settings>].csv "
+                             "(results/pid/eval/ for --pid)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel processes; each runs a block of seeds, so the CSV is the same as with 1")
     parser.add_argument("--pad-speed", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad speed range in m/s; default: the model's training range (static for --pid)")
     parser.add_argument("--own-velocity-obs", action="store_true",
@@ -48,6 +58,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--action-rate-limit is only for --pid; an agent's limit comes from its config.json")
     if args.speed_limit is not None and not args.pid:
         parser.error("--speed-limit is only for --pid; it changes what an agent's actions mean")
+    if args.gui and args.workers > 1:
+        parser.error("--gui needs --workers 1")
     return args
 
 
@@ -64,6 +76,18 @@ class AgentPolicy:
     def act(self, obs):
         action, _ = self.model.predict(obs, deterministic=self.deterministic)
         return action
+
+
+def run_dir(model: Path) -> Path:
+    # Checkpoints live in <run>/checkpoints/, the final model in <run>/
+    return model.parent.parent if model.parent.name == "checkpoints" else model.parent
+
+
+def checkpoint_label(model: Path) -> str:
+    # model_3000000_steps.zip -> 3000k, model.zip -> final
+    if model.stem.startswith("model_") and model.stem.endswith("_steps"):
+        return f"{int(model.stem.split('_')[1]) // 1000}k"
+    return "final" if model.stem == "model" else model.stem
 
 
 def training_env_kwargs(model: Path) -> dict:
@@ -132,6 +156,44 @@ def run_episode(env: LandingAviary, policy: AgentPolicy | PIDLander, seed: int, 
     }
 
 
+def make_policy(args: argparse.Namespace, env: LandingAviary) -> AgentPolicy | PIDLander:
+    if args.pid:
+        return PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs)
+    return AgentPolicy(PPO.load(args.model, device="cpu"), deterministic=not args.stochastic)
+
+
+def run_seeds(job: tuple) -> tuple[list[dict], int]:
+    # One worker: its own env and policy, a contiguous block of seeds. Every episode starts from env.reset(seed),
+    # so the result of a seed does not depend on which episodes ran before it in the same env.
+    args, env_kwargs, seeds = job
+    env = LandingAviary(gui=args.gui, **env_kwargs)
+    policy = make_policy(args, env)
+    rows = [run_episode(env, policy, int(seed), args.gui) for seed in seeds]
+    obs_size = env.obs_size
+    env.close()
+    return rows, obs_size
+
+
+def default_out(args: argparse.Namespace, pad_speed: tuple) -> Path:
+    # <policy>_seed<first>_n<episodes>[_<task settings>].csv; task settings only when they are not the policy's own
+    if args.pid:
+        folder = Path("results/pid/eval")
+        name = "pid" + ("_ff" if args.own_velocity_obs else "")
+        name += f"_rate{args.action_rate_limit:g}" if args.action_rate_limit is not None else ""
+        name += f"_vmax{args.speed_limit:g}" if args.speed_limit is not None else ""
+    else:
+        folder = run_dir(args.model) / "eval"
+        name = checkpoint_label(args.model) + ("_stochastic" if args.stochastic else "")
+    name += f"_seed{args.seed}_n{args.episodes}"
+    if args.pid or args.pad_speed is not None:  # the PID has no task of its own, so its pad speed is always named
+        name += f"_pad{pad_speed[0]:g}-{pad_speed[1]:g}"
+    name += "".join(f"_{label}" for label, flag in (("drag", args.drag), ("follow", args.start_following),
+                                                    ("pps", args.pad_per_physics_step)) if flag)
+    if args.pad_accel is not None:
+        name += f"_accel{args.pad_accel[0]:g}-{args.pad_accel[1]:g}"
+    return folder / f"{name}.csv"
+
+
 def main() -> None:
     args = parse_args()
     if args.pid:
@@ -148,31 +210,19 @@ def main() -> None:
     if args.pad_accel is not None:
         env_kwargs["pad_accel_range"] = tuple(args.pad_accel)
     pad_speed = env_kwargs["pad_speed_range"]
-    env = LandingAviary(gui=args.gui, **env_kwargs)
-    if args.pid:
-        out_dir = Path("results/pid")
-        policy = PIDLander(speed_limit=env.SPEED_LIMIT, dt=env.CTRL_TIMESTEP, feedforward=args.own_velocity_obs)
-    else:
-        out_dir = args.model.parent
-        policy = AgentPolicy(PPO.load(args.model, device="cpu"), deterministic=not args.stochastic)
-    # Static-pad files keep their old name; moving-pad files get the speed range in the name
-    suffix = f"_pad{pad_speed[0]:g}-{pad_speed[1]:g}" if pad_speed[1] > 0 else ""
-    if args.pid and args.own_velocity_obs:
-        suffix += "_feedforward"  # don't overwrite the plain PID baseline's CSV
-    if args.pid and args.action_rate_limit is not None:
-        suffix += f"_rate{args.action_rate_limit:g}"
-    if args.pid and args.speed_limit is not None:
-        suffix += f"_vmax{args.speed_limit:g}"
-    # Task settings in the name only when given on the command line (an agent's own task is already its folder)
-    suffix += "".join(f"_{name}" for name, flag in (("drag", args.drag), ("follow", args.start_following),
-                                                     ("pps", args.pad_per_physics_step)) if flag)
-    if args.pad_accel is not None:
-        suffix += f"_accel{args.pad_accel[0]:g}-{args.pad_accel[1]:g}"
-    out = args.out or out_dir / f"eval_seed{args.seed}{suffix}.csv"
+    out = args.out or default_out(args, pad_speed)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    rows = [run_episode(env, policy, args.seed + i, args.gui) for i in range(args.episodes)]
-    env.close()
+    blocks = np.array_split(np.arange(args.seed, args.seed + args.episodes), max(1, min(args.workers, args.episodes)))
+    jobs = [(args, env_kwargs, block) for block in blocks]
+    if len(jobs) == 1:
+        results = [run_seeds(jobs[0])]
+    else:
+        # spawn: fresh processes, no forked torch / PyBullet state from this one
+        with multiprocessing.get_context("spawn").Pool(len(jobs)) as pool:
+            results = pool.map(run_seeds, jobs)
+    rows = [row for block_rows, _ in results for row in block_rows]
+    obs_size = results[0][1]
 
     df = pd.DataFrame(rows)
     df.insert(0, "policy", "pid" if args.pid else "agent")
@@ -181,7 +231,7 @@ def main() -> None:
 
     touched = df[df["outcome"].isin(["landed", "bad_landing"])]
     print(f"\n{len(df)} episodes, seeds {args.seed}..{args.seed + args.episodes - 1}, "
-          f"pad speed {pad_speed[0]:g}-{pad_speed[1]:g} m/s, {env.obs_size}-value observation")
+          f"pad speed {pad_speed[0]:g}-{pad_speed[1]:g} m/s, {obs_size}-value observation")
     print(f"success rate:      {df['success'].mean():.0%}")
     print(f"outcomes:          {df['outcome'].value_counts().to_dict()}")
     if len(touched):
@@ -192,6 +242,8 @@ def main() -> None:
     if len(touched):
         rings = ", ".join(f"{(touched['touchdown_offset'] < cm / 100).mean():.0%} < {cm} cm" for cm in (2, 3, 5))
         print(f"precision:         {rings}")
+        soft = ", ".join(f"{(touched['touchdown_speed'] < v).mean():.0%} < {v:.2f}" for v in (0.15, 0.20, 0.25))
+        print(f"softness:          {soft} m/s")
     print(f"wrote {out}")
 
 

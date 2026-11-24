@@ -29,9 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feedforward", action="store_true",
                         help="15-value observation + pad-velocity feedforward (the PID that matches run 4)")
     parser.add_argument("--out", type=Path, default=None,
-                        help="default: results/pid/tradeoff_val.csv (tradeoff_val_feedforward.csv with --feedforward)")
+                        help="default: results/pid/val/tradeoff_val.csv (tradeoff_val_feedforward.csv with --feedforward)")
     args = parser.parse_args()
-    args.out = args.out or Path(f"results/pid/tradeoff_val{'_feedforward' if args.feedforward else ''}.csv")
+    args.out = args.out or Path(f"results/pid/val/tradeoff_val{'_feedforward' if args.feedforward else ''}.csv")
     return args
 
 

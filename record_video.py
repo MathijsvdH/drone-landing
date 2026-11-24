@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from stable_baselines3 import PPO
 
 from envs.landing_aviary import LandingAviary
-from evaluate import training_env_kwargs
+from evaluate import checkpoint_label, run_dir, training_env_kwargs
 
 WIDTH, HEIGHT = 1280, 720
 HOLD_SECONDS = 1.0  # freeze on the final frame so the touchdown is visible
@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pad-speed", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
                         help="pad speed range in m/s; default: from the CSV if static, else the model's training range")
     parser.add_argument("--out", type=Path, default=None,
-                        help="default: landing.mp4 (or video_<csv name>.mp4) next to the model")
+                        help="default: <run>/videos/<checkpoint>_seeds_<seeds>.mp4 (or <csv name>.mp4 with --from-csv)")
     return parser.parse_args()
 
 
@@ -83,11 +83,12 @@ def main() -> None:
     csv = pd.read_csv(args.from_csv) if args.from_csv else None
     if csv is not None:
         expected = seeds_from_csv(csv, args.outcomes, args.per_outcome)
-        default_name = f"video_{args.from_csv.stem}.mp4"
+        default_name = f"{args.from_csv.stem}.mp4"
     else:
         expected = {seed: None for seed in args.seeds}
-        default_name = "landing.mp4"
-    out = args.out or args.model.parent / default_name
+        default_name = f"{checkpoint_label(args.model)}_seeds_{'_'.join(str(seed) for seed in args.seeds)}.mp4"
+    out = args.out or run_dir(args.model) / "videos" / default_name
+    out.parent.mkdir(parents=True, exist_ok=True)
     model = PPO.load(args.model, device="cpu")
     env = LandingAviary(**replay_env_kwargs(args, csv))
     fps = env.CTRL_FREQ  # one frame per control step = real-time playback

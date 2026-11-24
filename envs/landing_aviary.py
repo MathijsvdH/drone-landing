@@ -58,6 +58,7 @@ class LandingAviary(BaseRLAviary):
                  fast_reset: bool = True,
                  action_rate_limit: float | None = None,
                  landing_reward_edge: float = LANDING_REWARD,
+                 landing_speed_reward_edge: float = LANDING_REWARD,
                  bad_landing_penalty: float = BAD_LANDING_PENALTY,
                  drag: bool = False,
                  start_following: bool = False,
@@ -89,6 +90,10 @@ class LandingAviary(BaseRLAviary):
         # Precision ("archery board"): the landing reward drops linearly from LANDING_REWARD at the pad centre to
         # landing_reward_edge at the offset limit. Equal to LANDING_REWARD = the old flat reward.
         self.landing_reward_edge = landing_reward_edge
+        # Softness (run 8): the same kind of cone on touchdown speed, LANDING_REWARD at 0 m/s down by
+        # (LANDING_REWARD - landing_speed_reward_edge) at the speed limit. Both cones add up; the worst landing that
+        # still counts (both at their limit) gets edge + speed edge - LANDING_REWARD, which must stay above a miss.
+        self.landing_speed_reward_edge = landing_speed_reward_edge
         self.bad_landing_penalty = bad_landing_penalty
         self.world_state: int | None = None  # saved PyBullet world for the fast reset, set below
         if drag:
@@ -285,7 +290,7 @@ class LandingAviary(BaseRLAviary):
         terms["progress"] = PROGRESS_WEIGHT * (self.prev_dist - dist)
         terms["time"] = TIME_PENALTY
         if self.outcome == "landed":
-            terms["landing"] = self._landingReward(self.touchdown_offset)
+            terms["landing"] = self._landingReward(self.touchdown_offset, self.touchdown_speed)
         elif self.outcome == "bad_landing":
             terms["bad_landing"] = self.bad_landing_penalty
         elif self.outcome in ("crashed", "out_of_bounds"):
@@ -296,12 +301,16 @@ class LandingAviary(BaseRLAviary):
         self.reward_terms = terms
         return float(sum(terms.values()))
 
-    def _landingReward(self, offset: float) -> float:
-        if self.landing_reward_edge == LANDING_REWARD:
-            return LANDING_REWARD  # flat reward, exactly as before
-        # Linear cone, not rings: every centimetre closer pays, also near the centre
-        fraction = offset / self.touchdown_offset_limit  # 0 at the centre, < 1 for every landing that counts
-        return LANDING_REWARD - (LANDING_REWARD - self.landing_reward_edge) * fraction
+    def _landingReward(self, offset: float, speed: float) -> float:
+        reward = LANDING_REWARD  # flat reward when both edges are left at LANDING_REWARD, exactly as before
+        if self.landing_reward_edge != LANDING_REWARD:
+            # Linear cone, not rings: every centimetre closer pays, also near the centre
+            fraction = offset / self.touchdown_offset_limit  # 0 at the centre, < 1 for every landing that counts
+            reward -= (LANDING_REWARD - self.landing_reward_edge) * fraction
+        if self.landing_speed_reward_edge != LANDING_REWARD:
+            # Linear from 0 m/s, not a bonus below some threshold: every bit softer pays, also far under the limit
+            reward -= (LANDING_REWARD - self.landing_speed_reward_edge) * speed / self.touchdown_speed_limit
+        return reward
 
     def _classifyOutcome(self, state: np.ndarray, rel_pos: np.ndarray) -> str:
         if p.getContactPoints(bodyA=int(self.DRONE_IDS[0]), bodyB=self.PAD_ID,
